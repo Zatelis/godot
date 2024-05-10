@@ -105,8 +105,6 @@ void EditorPropertyVectorN::_update_ratio() {
 
 		if (spin_sliders[base_slider_idx]->get_value() != 0) {
 			ratio_write[i] = spin_sliders[secondary_slider_idx]->get_value() / spin_sliders[base_slider_idx]->get_value();
-		} else {
-			ratio_write[i] = 0;
 		}
 	}
 }
@@ -131,7 +129,8 @@ void EditorPropertyVectorN::_notification(int p_what) {
 		case NOTIFICATION_READY: {
 			if (linked->is_visible()) {
 				const String key = vformat("%s:%s", get_edited_object()->get_class(), get_edited_property());
-				linked->set_pressed(EditorSettings::get_singleton()->get_project_metadata("linked_properties", key, true));
+				linked->set_pressed_no_signal(EditorSettings::get_singleton()->get_project_metadata("linked_properties", key, true));
+				_update_ratio();
 			}
 		} break;
 

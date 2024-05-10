@@ -67,28 +67,6 @@ layout(location = 13) in vec4 previous_normal_attrib;
 
 #endif // MOTION_VECTORS
 
-#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
-/* Specialization Constants (Toggles) */
-
-layout(constant_id = 2) const bool sc_use_light_soft_shadows = false;
-
-/* Specialization Constants (Values) */
-
-layout(constant_id = 8) const uint sc_directional_soft_shadow_samples = 4;
-layout(constant_id = 11) const bool sc_projector_use_mipmaps = true;
-
-// not used in clustered renderer but we share some code with the mobile renderer that requires this.
-const float sc_luminance_multiplier = 1.0;
-
-// Default to SPECULAR_SCHLICK_GGX.
-#if !defined(SPECULAR_DISABLED) && !defined(SPECULAR_SCHLICK_GGX) && !defined(SPECULAR_TOON)
-#define SPECULAR_SCHLICK_GGX
-#endif
-
-#include "../scene_forward_lights_inc.glsl"
-
-#endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
-
 vec3 oct_to_vec3(vec2 e) {
 	vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
 	float t = max(-v.z, 0.0);
@@ -151,7 +129,7 @@ layout(location = 9) out float dp_clip;
 #endif
 
 layout(location = 10) out flat uint instance_index_interp;
-layout(location = 11) out vec4 combined_projected;
+
 #ifdef USE_MULTIVIEW
 #ifdef has_VK_KHR_multiview
 #define ViewIndex gl_ViewIndex
@@ -162,17 +140,21 @@ layout(location = 11) out vec4 combined_projected;
 vec3 multiview_uv(vec2 uv) {
 	return vec3(uv, ViewIndex);
 }
+ivec3 multiview_uv(ivec2 uv) {
+	return ivec3(uv, int(ViewIndex));
+}
+layout(location = 11) out vec4 combined_projected;
 #else // USE_MULTIVIEW
 // Set to zero, not supported in non stereo
 #define ViewIndex 0
 vec2 multiview_uv(vec2 uv) {
 	return uv;
 }
+ivec2 multiview_uv(ivec2 uv) {
+	return uv;
+}
 #endif //USE_MULTIVIEW
-#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
-layout(location = 12) highp out vec4 diffuse_light_interp;
-layout(location = 13) highp out vec4 specular_light_interp;
-#endif
+
 invariant gl_Position;
 
 #GLOBALS
@@ -203,23 +185,6 @@ vec3 double_add_vec3(vec3 base_a, vec3 prec_a, vec3 base_b, vec3 prec_b, out vec
 	return s;
 }
 #endif
-
-#ifdef USE_VERTEX_LIGHTING
-void cluster_get_item_range(uint p_offset, out uint item_min, out uint item_max, out uint item_from, out uint item_to) {
-	uint item_min_max = cluster_buffer.data[p_offset];
-	item_min = item_min_max & 0xFFFFu;
-	item_max = item_min_max >> 16;
-
-	item_from = item_min >> 5;
-	item_to = (item_max == 0) ? 0 : ((item_max - 1) >> 5) + 1; //side effect of how it is stored, as item_max 0 means no elements
-}
-
-uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
-	int local_min = clamp(int(z_min) - int(i) * 32, 0, 31);
-	int mask_width = min(int(z_max) - int(z_min), 32 - local_min);
-	return bitfieldInsert(uint(0), uint(0xFFFFFFFF), local_min, mask_width);
-}
-#endif // USE_VERTEX_LIGHTING
 
 void vertex_shader(vec3 vertex_input,
 #ifdef NORMAL_USED
@@ -389,8 +354,9 @@ void vertex_shader(vec3 vertex_input,
 #ifdef OVERRIDE_POSITION
 	vec4 position;
 #endif
-	mat4 combined_projection = scene_data.projection_matrix;
+
 #ifdef USE_MULTIVIEW
+	mat4 combined_projection = scene_data.projection_matrix;
 	mat4 projection_matrix = scene_data.projection_matrix_view[ViewIndex];
 	mat4 inv_projection_matrix = scene_data.inv_projection_matrix_view[ViewIndex];
 	vec3 eye_offset = scene_data.eye_offset[ViewIndex].xyz;
@@ -511,349 +477,18 @@ void vertex_shader(vec3 vertex_input,
 	gl_Position = projection_matrix * vec4(vertex_interp, 1.0);
 #endif
 
+#ifdef USE_MULTIVIEW
 	combined_projected = combined_projection * vec4(vertex_interp, 1.0);
+#endif
 
 #ifdef MOTION_VECTORS
 	screen_pos = gl_Position;
 #endif
-#ifdef USE_VERTEX_LIGHTING
-	//lay out everything, whatever is unused is optimized away anyway
-	vec3 albedo = vec3(1.0);
-	vec3 backlight = vec3(0.0);
-	vec4 transmittance_color = vec4(0.0);
-	float transmittance_depth = 0.0;
-	float transmittance_boost = 0.0;
-	float metallic = 0.0;
-	float specular = 0.5;
-	vec3 emission = vec3(0.0);
-	float rim = 0.0;
-	float rim_tint = 0.0;
-	float clearcoat = 0.0;
-	float clearcoat_roughness = 0.0;
-	float anisotropy = 0.0;
-	vec2 anisotropy_flow = vec2(1.0, 0.0);
-#ifndef FOG_DISABLED
-	vec4 fog = vec4(0.0);
-#endif // !FOG_DISABLED
-#if defined(CUSTOM_RADIANCE_USED)
-	vec4 custom_radiance = vec4(0.0);
-#endif
-#if defined(CUSTOM_IRRADIANCE_USED)
-	vec4 custom_irradiance = vec4(0.0);
-#endif
-
-	float ao = 1.0;
-	float ao_light_affect = 0.0;
-
-	float alpha = 1.0;
-#endif // USE_VERTEX_LIGHTING
-// VERTEX LIGHTING
-#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
-	diffuse_light_interp = vec4(0.0);
-	specular_light_interp = vec4(0.0);
-
-	// UV in our combined frustum space is used for certain screen uv processes where it's
-	// overkill to render separate left and right eye views
-	vec2 combined_uv = (combined_projected.xy / combined_projected.w) * 0.5 + 0.5;
-
-	uvec2 cluster_pos = uvec2(combined_uv.xy / scene_data.screen_pixel_size) >> implementation_data.cluster_shift;
-	vec3 view = -normalize(vertex_interp - eye_offset);
-	uint cluster_offset = (implementation_data.cluster_width * cluster_pos.y + cluster_pos.x) * (implementation_data.max_cluster_element_count_div_32 + 32);
-
-	uint cluster_z = uint(clamp((-vertex.z / scene_data.z_far) * 32.0, 0.0, 31.0));
-	//used for interpolating anything cluster related
-	vec3 vertex_ddx = vec3(0); // Fake variable
-	vec3 vertex_ddy = vec3(0); // Fake variable
-	// convert ao to direct light ao
-	ao = mix(1.0, ao, ao_light_affect);
-
-	//this saves some VGPRs
-	vec3 f0 = F0(metallic, specular, albedo);
-
-	{
-#if defined(DIFFUSE_TOON)
-		//simplify for toon, as
-		specular_light_interp.rgb *= specular * metallic * albedo * 2.0;
-#else
-
-		// scales the specular reflections, needs to be computed before lighting happens,
-		// but after environment, GI, and reflection probes are added
-		// Environment brdf approximation (Lazarov 2013)
-		// see https://www.unrealengine.com/en-US/blog/physically-based-shading-on-mobile
-		const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
-		const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
-		vec4 r = roughness * c0 + c1;
-		float ndotv = clamp(dot(normal, view), 0.0, 1.0);
-		float a004 = min(r.x * r.x, exp2(-9.28 * ndotv)) * r.x + r.y;
-		vec2 env = vec2(-1.04, 1.04) * a004 + r.zw;
-
-		specular_light_interp.rgb *= env.x * f0 + env.y * clamp(50.0 * f0.g, metallic, 1.0);
-#endif
-	}
-
-#if !defined(MODE_RENDER_DEPTH)
-	//this saves some VGPRs
-	uint orms = packUnorm4x8(vec4(ao, roughness, metallic, specular));
-#endif
-
-	{ // Directional light.
-
-		for (uint i = 0; i < 8; i++) {
-			if (i >= scene_data.directional_light_count) {
-				break;
-			}
-
-			if (!bool(directional_lights.data[i].mask & instances.data[instance_index].layer_mask)) {
-				continue; //not masked
-			}
-
-			if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-				continue; // Statically baked light and object uses lightmap, skip
-			}
-
-#ifdef LIGHT_TRANSMITTANCE_USED
-			float transmittance_z = transmittance_depth;
-
-			if (directional_lights.data[i].shadow_opacity > 0.001) {
-				float depth_z = -vertex.z;
-
-				if (depth_z < directional_lights.data[i].shadow_split_offsets.x) {
-					vec4 trans_vertex = vec4(vertex - normalize(normal_interp) * directional_lights.data[i].shadow_transmittance_bias.x, 1.0);
-					vec4 trans_coord = directional_lights.data[i].shadow_matrix1 * trans_vertex;
-					trans_coord /= trans_coord.w;
-
-					float shadow_z = textureLod(sampler2D(directional_shadow_atlas, SAMPLER_LINEAR_CLAMP), trans_coord.xy, 0.0).r;
-					shadow_z *= directional_lights.data[i].shadow_z_range.x;
-					float z = trans_coord.z * directional_lights.data[i].shadow_z_range.x;
-
-					transmittance_z = z - shadow_z;
-				} else if (depth_z < directional_lights.data[i].shadow_split_offsets.y) {
-					vec4 trans_vertex = vec4(vertex - normalize(normal_interp) * directional_lights.data[i].shadow_transmittance_bias.y, 1.0);
-					vec4 trans_coord = directional_lights.data[i].shadow_matrix2 * trans_vertex;
-					trans_coord /= trans_coord.w;
-
-					float shadow_z = textureLod(sampler2D(directional_shadow_atlas, SAMPLER_LINEAR_CLAMP), trans_coord.xy, 0.0).r;
-					shadow_z *= directional_lights.data[i].shadow_z_range.y;
-					float z = trans_coord.z * directional_lights.data[i].shadow_z_range.y;
-
-					transmittance_z = z - shadow_z;
-				} else if (depth_z < directional_lights.data[i].shadow_split_offsets.z) {
-					vec4 trans_vertex = vec4(vertex - normalize(normal_interp) * directional_lights.data[i].shadow_transmittance_bias.z, 1.0);
-					vec4 trans_coord = directional_lights.data[i].shadow_matrix3 * trans_vertex;
-					trans_coord /= trans_coord.w;
-
-					float shadow_z = textureLod(sampler2D(directional_shadow_atlas, SAMPLER_LINEAR_CLAMP), trans_coord.xy, 0.0).r;
-					shadow_z *= directional_lights.data[i].shadow_z_range.z;
-					float z = trans_coord.z * directional_lights.data[i].shadow_z_range.z;
-
-					transmittance_z = z - shadow_z;
-
-				} else {
-					vec4 trans_vertex = vec4(vertex - normalize(normal_interp) * directional_lights.data[i].shadow_transmittance_bias.w, 1.0);
-					vec4 trans_coord = directional_lights.data[i].shadow_matrix4 * trans_vertex;
-					trans_coord /= trans_coord.w;
-
-					float shadow_z = textureLod(sampler2D(directional_shadow_atlas, SAMPLER_LINEAR_CLAMP), trans_coord.xy, 0.0).r;
-					shadow_z *= directional_lights.data[i].shadow_z_range.w;
-					float z = trans_coord.z * directional_lights.data[i].shadow_z_range.w;
-
-					transmittance_z = z - shadow_z;
-				}
-			}
-#endif
-
-			float shadow = 1.0;
-
-#ifdef DEBUG_DRAW_PSSM_SPLITS
-			vec3 tint = vec3(1.0);
-			if (-vertex.z < directional_lights.data[i].shadow_split_offsets.x) {
-				tint = vec3(1.0, 0.0, 0.0);
-			} else if (-vertex.z < directional_lights.data[i].shadow_split_offsets.y) {
-				tint = vec3(0.0, 1.0, 0.0);
-			} else if (-vertex.z < directional_lights.data[i].shadow_split_offsets.z) {
-				tint = vec3(0.0, 0.0, 1.0);
-			} else {
-				tint = vec3(1.0, 1.0, 0.0);
-			}
-			tint = mix(tint, vec3(1.0), shadow);
-			shadow = 1.0;
-#endif
-
-			float size_A = sc_use_light_soft_shadows ? directional_lights.data[i].size : 0.0;
-
-			light_compute(normal, directional_lights.data[i].direction, normalize(view), size_A,
-#ifndef DEBUG_DRAW_PSSM_SPLITS
-					directional_lights.data[i].color * directional_lights.data[i].energy,
-#else
-					directional_lights.data[i].color * directional_lights.data[i].energy * tint,
-#endif
-					true, 1.0, f0, orms, 1.0, albedo, alpha,
-#ifdef LIGHT_BACKLIGHT_USED
-					backlight,
-#endif
-#ifdef LIGHT_TRANSMITTANCE_USED
-					transmittance_color,
-					transmittance_depth,
-					transmittance_boost,
-					transmittance_z,
-#endif
-#ifdef LIGHT_RIM_USED
-					rim, rim_tint,
-#endif
-#ifdef LIGHT_CLEARCOAT_USED
-					clearcoat, clearcoat_roughness, normalize(normal_interp),
-#endif
-#ifdef LIGHT_ANISOTROPY_USED
-					binormal,
-					tangent, anisotropy,
-#endif
-					diffuse_light_interp.rgb,
-					specular_light_interp.rgb);
-		}
-	}
-
-	{ //omni lights
-
-		uint cluster_omni_offset = cluster_offset;
-
-		uint item_min;
-		uint item_max;
-		uint item_from;
-		uint item_to;
-
-		cluster_get_item_range(cluster_omni_offset + implementation_data.max_cluster_element_count_div_32 + cluster_z, item_min, item_max, item_from, item_to);
-
-#ifdef USE_SUBGROUPS
-		item_from = subgroupBroadcastFirst(subgroupMin(item_from));
-		item_to = subgroupBroadcastFirst(subgroupMax(item_to));
-#endif
-
-		for (uint i = item_from; i < item_to; i++) {
-			uint mask = cluster_buffer.data[cluster_omni_offset + i];
-			mask &= cluster_get_range_clip_mask(i, item_min, item_max);
-#ifdef USE_SUBGROUPS
-			uint merged_mask = subgroupBroadcastFirst(subgroupOr(mask));
-#else
-			uint merged_mask = mask;
-#endif
-
-			while (merged_mask != 0) {
-				uint bit = findMSB(merged_mask);
-				merged_mask &= ~(1u << bit);
-#ifdef USE_SUBGROUPS
-				if (((1u << bit) & mask) == 0) { //do not process if not originally here
-					continue;
-				}
-#endif
-				uint light_index = 32 * i + bit;
-
-				if (!bool(omni_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
-					continue; //not masked
-				}
-
-				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-					continue; // Statically baked light and object uses lightmap, skip
-				}
-
-				light_process_omni(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, orms, 1.0, albedo, alpha,
-#ifdef LIGHT_BACKLIGHT_USED
-						backlight,
-#endif
-#ifdef LIGHT_TRANSMITTANCE_USED
-						transmittance_color,
-						transmittance_depth,
-						transmittance_boost,
-#endif
-#ifdef LIGHT_RIM_USED
-						rim,
-						rim_tint,
-#endif
-#ifdef LIGHT_CLEARCOAT_USED
-						clearcoat, clearcoat_roughness, normalize(normal_interp),
-#endif
-#ifdef LIGHT_ANISOTROPY_USED
-						tangent, binormal, anisotropy,
-#endif
-						diffuse_light_interp.rgb, specular_light_interp.rgb);
-			}
-		}
-	}
-
-	{ //spot lights
-
-		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
-
-		uint item_min;
-		uint item_max;
-		uint item_from;
-		uint item_to;
-
-		cluster_get_item_range(cluster_spot_offset + implementation_data.max_cluster_element_count_div_32 + cluster_z, item_min, item_max, item_from, item_to);
-
-#ifdef USE_SUBGROUPS
-		item_from = subgroupBroadcastFirst(subgroupMin(item_from));
-		item_to = subgroupBroadcastFirst(subgroupMax(item_to));
-#endif
-
-		for (uint i = item_from; i < item_to; i++) {
-			uint mask = cluster_buffer.data[cluster_spot_offset + i];
-			mask &= cluster_get_range_clip_mask(i, item_min, item_max);
-#ifdef USE_SUBGROUPS
-			uint merged_mask = subgroupBroadcastFirst(subgroupOr(mask));
-#else
-			uint merged_mask = mask;
-#endif
-
-			while (merged_mask != 0) {
-				uint bit = findMSB(merged_mask);
-				merged_mask &= ~(1u << bit);
-#ifdef USE_SUBGROUPS
-				if (((1u << bit) & mask) == 0) { //do not process if not originally here
-					continue;
-				}
-#endif
-
-				uint light_index = 32 * i + bit;
-
-				if (!bool(spot_lights.data[light_index].mask & instances.data[instance_index].layer_mask)) {
-					continue; //not masked
-				}
-
-				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
-					continue; // Statically baked light and object uses lightmap, skip
-				}
-
-				light_process_spot(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, orms, 1.0, albedo, alpha,
-#ifdef LIGHT_BACKLIGHT_USED
-						backlight,
-#endif
-#ifdef LIGHT_TRANSMITTANCE_USED
-						transmittance_color,
-						transmittance_depth,
-						transmittance_boost,
-#endif
-#ifdef LIGHT_RIM_USED
-						rim,
-						rim_tint,
-#endif
-#ifdef LIGHT_CLEARCOAT_USED
-						clearcoat, clearcoat_roughness, normalize(normal_interp),
-#endif
-#ifdef LIGHT_ANISOTROPY_USED
-						tangent,
-						binormal, anisotropy,
-#endif
-						diffuse_light_interp.rgb, specular_light_interp.rgb);
-			}
-		}
-	}
-
-#endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
 
 #ifdef MODE_RENDER_DEPTH
 	if (scene_data.pancake_shadows) {
-		if (gl_Position.z <= 0.00001) {
-			gl_Position.z = 0.00001;
+		if (gl_Position.z >= 0.9999) {
+			gl_Position.z = 0.9999;
 		}
 	}
 #endif
@@ -1021,6 +656,7 @@ layout(constant_id = 9) const uint sc_directional_penumbra_shadow_samples = 4;
 
 layout(constant_id = 10) const bool sc_decal_use_mipmaps = true;
 layout(constant_id = 11) const bool sc_projector_use_mipmaps = true;
+layout(constant_id = 12) const bool sc_use_depth_fog = false;
 
 // not used in clustered renderer but we share some code with the mobile renderer that requires this.
 const float sc_luminance_multiplier = 1.0;
@@ -1075,6 +711,9 @@ layout(location = 10) in flat uint instance_index_interp;
 vec3 multiview_uv(vec2 uv) {
 	return vec3(uv, ViewIndex);
 }
+ivec3 multiview_uv(ivec2 uv) {
+	return ivec3(uv, int(ViewIndex));
+}
 layout(location = 11) in vec4 combined_projected;
 #else // USE_MULTIVIEW
 // Set to zero, not supported in non stereo
@@ -1082,11 +721,11 @@ layout(location = 11) in vec4 combined_projected;
 vec2 multiview_uv(vec2 uv) {
 	return uv;
 }
+ivec2 multiview_uv(ivec2 uv) {
+	return uv;
+}
 #endif //USE_MULTIVIEW
-#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
-layout(location = 12) highp in vec4 diffuse_light_interp;
-layout(location = 13) highp in vec4 specular_light_interp;
-#endif
+
 //defines to keep compatibility with vertex
 
 #ifdef USE_MULTIVIEW
@@ -1190,10 +829,10 @@ vec4 fog_process(vec3 vertex) {
 #ifdef USE_RADIANCE_CUBEMAP_ARRAY
 		float lod, blend;
 		blend = modf(mip_level * MAX_ROUGHNESS_LOD, lod);
-		sky_fog_color = texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(cube_view, lod)).rgb;
-		sky_fog_color = mix(sky_fog_color, texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(cube_view, lod + 1)).rgb, blend);
+		sky_fog_color = texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(cube_view, lod)).rgb;
+		sky_fog_color = mix(sky_fog_color, texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(cube_view, lod + 1)).rgb, blend);
 #else
-		sky_fog_color = textureLod(samplerCube(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), cube_view, mip_level * MAX_ROUGHNESS_LOD).rgb;
+		sky_fog_color = textureLod(samplerCube(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), cube_view, mip_level * MAX_ROUGHNESS_LOD).rgb;
 #endif //USE_RADIANCE_CUBEMAP_ARRAY
 		fog_color = mix(fog_color, sky_fog_color, scene_data_block.data.fog_aerial_perspective);
 	}
@@ -1210,7 +849,15 @@ vec4 fog_process(vec3 vertex) {
 		}
 	}
 
-	float fog_amount = 1.0 - exp(min(0.0, -length(vertex) * scene_data_block.data.fog_density));
+	float fog_amount = 0.0;
+
+	if (sc_use_depth_fog) {
+		float fog_z = smoothstep(scene_data_block.data.fog_depth_begin, scene_data_block.data.fog_depth_end, length(vertex));
+		float fog_quad_amount = pow(fog_z, scene_data_block.data.fog_depth_curve) * scene_data_block.data.fog_density;
+		fog_amount = fog_quad_amount;
+	} else {
+		fog_amount = 1 - exp(min(0.0, -length(vertex) * scene_data_block.data.fog_density));
+	}
 
 	if (abs(scene_data_block.data.fog_height_density) >= 0.0001) {
 		float y = (scene_data_block.data.inv_view_matrix * vec4(vertex, 1.0)).y;
@@ -1242,9 +889,34 @@ uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
 
 #endif //!MODE_RENDER DEPTH
 
+#if defined(MODE_RENDER_NORMAL_ROUGHNESS) || defined(MODE_RENDER_MATERIAL)
+// https://advances.realtimerendering.com/s2010/Kaplanyan-CryEngine3(SIGGRAPH%202010%20Advanced%20RealTime%20Rendering%20Course).pdf
+vec3 encode24(vec3 v) {
+	// Unsigned normal (handles most symmetry)
+	vec3 vNormalUns = abs(v);
+	// Get the major axis for our collapsed cubemap lookup
+	float maxNAbs = max(vNormalUns.z, max(vNormalUns.x, vNormalUns.y));
+	// Get the collapsed cubemap texture coordinates
+	vec2 vTexCoord = vNormalUns.z < maxNAbs ? (vNormalUns.y < maxNAbs ? vNormalUns.yz : vNormalUns.xz) : vNormalUns.xy;
+	vTexCoord /= maxNAbs;
+	vTexCoord = vTexCoord.x < vTexCoord.y ? vTexCoord.yx : vTexCoord.xy;
+	// Stretch:
+	vTexCoord.y /= vTexCoord.x;
+	float fFittingScale = texture(sampler2D(best_fit_normal_texture, SAMPLER_NEAREST_CLAMP), vTexCoord).r;
+	// Make vector touch unit cube
+	vec3 result = v / maxNAbs;
+	// scale the normal to get the best fit
+	result *= fFittingScale;
+	return result;
+}
+#endif // MODE_RENDER_NORMAL_ROUGHNESS
+
 void fragment_shader(in SceneData scene_data) {
 	uint instance_index = instance_index_interp;
 
+#ifdef PREMUL_ALPHA_USED
+	float premul_alpha = 1.0;
+#endif // PREMUL_ALPHA_USED
 	//lay out everything, whatever is unused is optimized away anyway
 	vec3 vertex = vertex_interp;
 #ifdef USE_MULTIVIEW
@@ -1353,6 +1025,11 @@ void fragment_shader(in SceneData scene_data) {
 	inv_view_matrix[1][3] = 0.0;
 	inv_view_matrix[2][3] = 0.0;
 #endif
+
+#ifdef LIGHT_VERTEX_USED
+	vec3 light_vertex = vertex;
+#endif //LIGHT_VERTEX_USED
+
 	mat4 read_view_matrix = scene_data.view_matrix;
 	vec2 read_viewport_size = scene_data.viewport_size;
 	{
@@ -1362,6 +1039,15 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef LIGHT_TRANSMITTANCE_USED
 	transmittance_color.a *= sss_strength;
 #endif
+
+#ifdef LIGHT_VERTEX_USED
+	vertex = light_vertex;
+#ifdef USE_MULTIVIEW
+	view = -normalize(vertex - eye_offset);
+#else
+	view = -normalize(vertex);
+#endif //USE_MULTIVIEW
+#endif //LIGHT_VERTEX_USED
 
 #ifndef USE_SHADOW_TO_OPACITY
 
@@ -1616,10 +1302,7 @@ void fragment_shader(in SceneData scene_data) {
 	vec3 specular_light = vec3(0.0, 0.0, 0.0);
 	vec3 diffuse_light = vec3(0.0, 0.0, 0.0);
 	vec3 ambient_light = vec3(0.0, 0.0, 0.0);
-#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING) // Pass Vertex Lighting colors
-	specular_light = specular_light_interp.rgb;
-	diffuse_light = diffuse_light_interp.rgb;
-#endif
+
 #ifndef MODE_UNSHADED
 	// Used in regular draw pass and when drawing SDFs for SDFGI and materials for VoxelGI.
 	emission *= scene_data.emissive_exposure_normalization;
@@ -1648,11 +1331,11 @@ void fragment_shader(in SceneData scene_data) {
 		float lod, blend;
 
 		blend = modf(sqrt(roughness) * MAX_ROUGHNESS_LOD, lod);
-		specular_light = texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod)).rgb;
-		specular_light = mix(specular_light, texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod + 1)).rgb, blend);
+		specular_light = texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod)).rgb;
+		specular_light = mix(specular_light, texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod + 1)).rgb, blend);
 
 #else
-		specular_light = textureLod(samplerCube(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ref_vec, sqrt(roughness) * MAX_ROUGHNESS_LOD).rgb;
+		specular_light = textureLod(samplerCube(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ref_vec, sqrt(roughness) * MAX_ROUGHNESS_LOD).rgb;
 
 #endif //USE_RADIANCE_CUBEMAP_ARRAY
 		specular_light *= scene_data.IBL_exposure_normalization;
@@ -1672,9 +1355,9 @@ void fragment_shader(in SceneData scene_data) {
 		if (scene_data.use_ambient_cubemap) {
 			vec3 ambient_dir = scene_data.radiance_inverse_xform * normal;
 #ifdef USE_RADIANCE_CUBEMAP_ARRAY
-			vec3 cubemap_ambient = texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ambient_dir, MAX_ROUGHNESS_LOD)).rgb;
+			vec3 cubemap_ambient = texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ambient_dir, MAX_ROUGHNESS_LOD)).rgb;
 #else
-			vec3 cubemap_ambient = textureLod(samplerCube(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ambient_dir, MAX_ROUGHNESS_LOD).rgb;
+			vec3 cubemap_ambient = textureLod(samplerCube(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ambient_dir, MAX_ROUGHNESS_LOD).rgb;
 #endif //USE_RADIANCE_CUBEMAP_ARRAY
 			cubemap_ambient *= scene_data.IBL_exposure_normalization;
 			ambient_light = mix(ambient_light, cubemap_ambient * scene_data.ambient_light_color_energy.a, scene_data.ambient_color_sky_mix);
@@ -1705,11 +1388,11 @@ void fragment_shader(in SceneData scene_data) {
 
 		float lod, blend;
 		blend = modf(roughness_lod, lod);
-		vec3 clearcoat_light = texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod)).rgb;
-		clearcoat_light = mix(clearcoat_light, texture(samplerCubeArray(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod + 1)).rgb, blend);
+		vec3 clearcoat_light = texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod)).rgb;
+		clearcoat_light = mix(clearcoat_light, texture(samplerCubeArray(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec4(ref_vec, lod + 1)).rgb, blend);
 
 #else
-		vec3 clearcoat_light = textureLod(samplerCube(radiance_cubemap, SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ref_vec, roughness_lod).rgb;
+		vec3 clearcoat_light = textureLod(samplerCube(radiance_cubemap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), ref_vec, roughness_lod).rgb;
 
 #endif //USE_RADIANCE_CUBEMAP_ARRAY
 		specular_light += clearcoat_light * horizon * horizon * Fc * scene_data.ambient_light_color_energy.a;
@@ -1896,18 +1579,18 @@ void fragment_shader(in SceneData scene_data) {
 			vec2 base_coord = screen_uv;
 			vec2 closest_coord = base_coord;
 #ifdef USE_MULTIVIEW
-			float closest_ang = dot(normal, textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(base_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0);
+			float closest_ang = dot(normal, normalize(textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(base_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0));
 #else // USE_MULTIVIEW
-			float closest_ang = dot(normal, textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), base_coord, 0.0).xyz * 2.0 - 1.0);
+			float closest_ang = dot(normal, normalize(textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), base_coord, 0.0).xyz * 2.0 - 1.0));
 #endif // USE_MULTIVIEW
 
 			for (int i = 0; i < 4; i++) {
 				const vec2 neighbors[4] = vec2[](vec2(-1, 0), vec2(1, 0), vec2(0, -1), vec2(0, 1));
 				vec2 neighbour_coord = base_coord + neighbors[i] * scene_data.screen_pixel_size;
 #ifdef USE_MULTIVIEW
-				float neighbour_ang = dot(normal, textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(neighbour_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0);
+				float neighbour_ang = dot(normal, normalize(textureLod(sampler2DArray(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), vec3(neighbour_coord, ViewIndex), 0.0).xyz * 2.0 - 1.0));
 #else // USE_MULTIVIEW
-				float neighbour_ang = dot(normal, textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), neighbour_coord, 0.0).xyz * 2.0 - 1.0);
+				float neighbour_ang = dot(normal, normalize(textureLod(sampler2D(normal_roughness_buffer, SAMPLER_LINEAR_CLAMP), neighbour_coord, 0.0).xyz * 2.0 - 1.0));
 #endif // USE_MULTIVIEW
 				if (neighbour_ang > closest_ang) {
 					closest_ang = neighbour_ang;
@@ -2068,7 +1751,7 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 // LIGHTING
-#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && !defined(USE_VERTEX_LIGHTING)
+#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
 	{ // Directional light.
 
@@ -2237,7 +1920,7 @@ void fragment_shader(in SceneData scene_data) {
 
 					pssm_coord /= pssm_coord.w;
 
-					shadow = sample_directional_pcf_shadow(directional_shadow_atlas, scene_data.directional_shadow_pixel_size * directional_lights.data[i].soft_shadow_scale * blur_factor, pssm_coord);
+					shadow = sample_directional_pcf_shadow(directional_shadow_atlas, scene_data.directional_shadow_pixel_size * directional_lights.data[i].soft_shadow_scale * (blur_factor + (1.0 - blur_factor) * float(directional_lights.data[i].blend_splits)), pssm_coord);
 
 					if (directional_lights.data[i].blend_splits) {
 						float pssm_blend;
@@ -2247,21 +1930,21 @@ void fragment_shader(in SceneData scene_data) {
 							vec4 v = vec4(vertex, 1.0);
 							BIAS_FUNC(v, 1)
 							pssm_coord = (directional_lights.data[i].shadow_matrix2 * v);
-							pssm_blend = smoothstep(0.0, directional_lights.data[i].shadow_split_offsets.x, depth_z);
+							pssm_blend = smoothstep(directional_lights.data[i].shadow_split_offsets.x - directional_lights.data[i].shadow_split_offsets.x * 0.1, directional_lights.data[i].shadow_split_offsets.x, depth_z);
 							// Adjust shadow blur with reference to the first split to reduce discrepancy between shadow splits.
 							blur_factor2 = directional_lights.data[i].shadow_split_offsets.x / directional_lights.data[i].shadow_split_offsets.y;
 						} else if (depth_z < directional_lights.data[i].shadow_split_offsets.y) {
 							vec4 v = vec4(vertex, 1.0);
 							BIAS_FUNC(v, 2)
 							pssm_coord = (directional_lights.data[i].shadow_matrix3 * v);
-							pssm_blend = smoothstep(directional_lights.data[i].shadow_split_offsets.x, directional_lights.data[i].shadow_split_offsets.y, depth_z);
+							pssm_blend = smoothstep(directional_lights.data[i].shadow_split_offsets.y - directional_lights.data[i].shadow_split_offsets.y * 0.1, directional_lights.data[i].shadow_split_offsets.y, depth_z);
 							// Adjust shadow blur with reference to the first split to reduce discrepancy between shadow splits.
 							blur_factor2 = directional_lights.data[i].shadow_split_offsets.x / directional_lights.data[i].shadow_split_offsets.z;
 						} else if (depth_z < directional_lights.data[i].shadow_split_offsets.z) {
 							vec4 v = vec4(vertex, 1.0);
 							BIAS_FUNC(v, 3)
 							pssm_coord = (directional_lights.data[i].shadow_matrix4 * v);
-							pssm_blend = smoothstep(directional_lights.data[i].shadow_split_offsets.y, directional_lights.data[i].shadow_split_offsets.z, depth_z);
+							pssm_blend = smoothstep(directional_lights.data[i].shadow_split_offsets.z - directional_lights.data[i].shadow_split_offsets.z * 0.1, directional_lights.data[i].shadow_split_offsets.z, depth_z);
 							// Adjust shadow blur with reference to the first split to reduce discrepancy between shadow splits.
 							blur_factor2 = directional_lights.data[i].shadow_split_offsets.x / directional_lights.data[i].shadow_split_offsets.w;
 						} else {
@@ -2271,7 +1954,7 @@ void fragment_shader(in SceneData scene_data) {
 
 						pssm_coord /= pssm_coord.w;
 
-						float shadow2 = sample_directional_pcf_shadow(directional_shadow_atlas, scene_data.directional_shadow_pixel_size * directional_lights.data[i].soft_shadow_scale * blur_factor2, pssm_coord);
+						float shadow2 = sample_directional_pcf_shadow(directional_shadow_atlas, scene_data.directional_shadow_pixel_size * directional_lights.data[i].soft_shadow_scale * (blur_factor2 + (1.0 - blur_factor2) * float(directional_lights.data[i].blend_splits)), pssm_coord);
 						shadow = mix(shadow, shadow2, pssm_blend);
 					}
 				}
@@ -2377,7 +2060,7 @@ void fragment_shader(in SceneData scene_data) {
 			shadow = 1.0;
 #endif
 
-			float size_A = sc_use_light_soft_shadows ? directional_lights.data[i].size : 0.0;
+			float size_A = sc_use_directional_soft_shadows ? directional_lights.data[i].size : 0.0;
 
 			light_compute(normal, directional_lights.data[i].direction, normalize(view), size_A,
 #ifndef DEBUG_DRAW_PSSM_SPLITS
@@ -2554,28 +2237,20 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 
-#endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && !defined(USE_VERTEX_LIGHTING)
-
 #ifdef USE_SHADOW_TO_OPACITY
+#ifndef MODE_RENDER_DEPTH
 	alpha = min(alpha, clamp(length(ambient_light), 0.0, 1.0));
 
 #if defined(ALPHA_SCISSOR_USED)
 	if (alpha < alpha_scissor) {
 		discard;
 	}
-#else
-#ifdef MODE_RENDER_DEPTH
-#ifdef USE_OPAQUE_PREPASS
-
-	if (alpha < scene_data.opaque_prepass_threshold) {
-		discard;
-	}
-
-#endif // USE_OPAQUE_PREPASS
-#endif // MODE_RENDER_DEPTH
 #endif // ALPHA_SCISSOR_USED
 
+#endif // !MODE_RENDER_DEPTH
 #endif // USE_SHADOW_TO_OPACITY
+
+#endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 
 #ifdef MODE_RENDER_DEPTH
 
@@ -2679,7 +2354,7 @@ void fragment_shader(in SceneData scene_data) {
 	albedo_output_buffer.rgb = albedo;
 	albedo_output_buffer.a = alpha;
 
-	normal_output_buffer.rgb = normal * 0.5 + 0.5;
+	normal_output_buffer.rgb = encode24(normal) * 0.5 + 0.5;
 	normal_output_buffer.a = 0.0;
 	depth_output_buffer.r = -vertex.z;
 
@@ -2693,7 +2368,15 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
-	normal_roughness_output_buffer = vec4(normal * 0.5 + 0.5, roughness);
+	normal_roughness_output_buffer = vec4(encode24(normal) * 0.5 + 0.5, roughness);
+
+	// We encode the dynamic static into roughness.
+	// Values over 0.5 are dynamic, under 0.5 are static.
+	normal_roughness_output_buffer.w = normal_roughness_output_buffer.w * (127.0 / 255.0);
+	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_DYNAMIC)) {
+		normal_roughness_output_buffer.w = 1.0 - normal_roughness_output_buffer.w;
+	}
+	normal_roughness_output_buffer.w = normal_roughness_output_buffer.w;
 
 #ifdef MODE_RENDER_VOXEL_GI
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_VOXEL_GI)) { // process voxel_gi_instances
@@ -2778,6 +2461,10 @@ void fragment_shader(in SceneData scene_data) {
 
 	motion_vector = prev_position_uv - position_uv;
 #endif
+
+#if defined(PREMUL_ALPHA_USED) && !defined(MODE_RENDER_DEPTH)
+	frag_color.rgb *= premul_alpha;
+#endif //PREMUL_ALPHA_USED
 }
 
 void main() {

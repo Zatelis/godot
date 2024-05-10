@@ -32,7 +32,7 @@
 
 #include "editor/debugger/script_editor_debugger.h"
 
-void EditorDebuggerSession::_breaked(bool p_really_did, bool p_can_debug, String p_message, bool p_has_stackdump) {
+void EditorDebuggerSession::_breaked(bool p_really_did, bool p_can_debug, const String &p_message, bool p_has_stackdump) {
 	if (p_really_did) {
 		emit_signal(SNAME("breaked"), p_can_debug);
 	} else {
@@ -140,8 +140,8 @@ EditorDebuggerPlugin::~EditorDebuggerPlugin() {
 }
 
 void EditorDebuggerPlugin::clear() {
-	for (int i = 0; i < sessions.size(); i++) {
-		sessions[i]->detach_debugger();
+	for (Ref<EditorDebuggerSession> &session : sessions) {
+		session->detach_debugger();
 	}
 	sessions.clear();
 }
@@ -157,13 +157,13 @@ void EditorDebuggerPlugin::setup_session(int p_idx) {
 
 Ref<EditorDebuggerSession> EditorDebuggerPlugin::get_session(int p_idx) {
 	ERR_FAIL_INDEX_V(p_idx, sessions.size(), nullptr);
-	return sessions[p_idx];
+	return sessions.get(p_idx);
 }
 
 Array EditorDebuggerPlugin::get_sessions() {
 	Array ret;
-	for (int i = 0; i < sessions.size(); i++) {
-		ret.push_back(sessions[i]);
+	for (const Ref<EditorDebuggerSession> &session : sessions) {
+		ret.push_back(session);
 	}
 	return ret;
 }
